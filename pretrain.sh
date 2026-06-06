@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=diffusion_pretrain
-#SBATCH --account=gts-cdeo3             # Targets Professor Chaitanya Deo's active allocation account
+#SBATCH -A [YOUR_ACCOUNT_ALLOCATION]
 #SBATCH --qos=embers                      # Standard production high-priority queue on Phoenix
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
