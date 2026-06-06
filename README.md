@@ -12,6 +12,11 @@ Rather than utilizing standard token-by-token sequence estimation loops, this fr
 
 ---
 
+## Pretrain Structure
+(diffusion_generations.svg)
+
+---
+
 ## Repository Structure
 
 * model.py — Deep bidirectional conditional transformer configuration, including timestep and target property frequency projection embedding layers.
