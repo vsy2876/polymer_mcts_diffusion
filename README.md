@@ -13,7 +13,7 @@ Rather than utilizing standard token-by-token sequence estimation loops, this fr
 ---
 
 ## Pretrain Structure
-(diffusion_generations.svg)
+![Diffusion Results](diffusion_generations.svg)
 
 ---
 
