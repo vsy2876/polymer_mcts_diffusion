@@ -1,0 +1,10 @@
+checkpoints/
+logs/
+__pycache__/
+plots/
+*.pt
+*.csv
+*.out
+*.err
+surrogate.py
+surrogate.sh
