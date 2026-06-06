@@ -41,7 +41,8 @@ from rdkit.Chem import AllChem
 PRETRAIN_CHECKPOINT = "./checkpoints/pretrain/best_pretrain/best_pretrain.pt"
 PROPERTY_MIN = 0.5
 PROPERTY_MAX = 10.0
-OUTPUT_DIR = './checkpoints/mcts_diffusion'
+OUTPUT_SCRATCH_DIR = '/storage/home/hcoda1/2/vyadav68/scratch/polymers/checkpoints/mcts_diffusion'
+OUTPUT_HOME_DIR    = './checkpoints/mcts_diffusion'
 
 MAX_LENGTH = 128     # Adjusted to PSELFIES pretrain configuration
 ITERATIONS = 5000    # Number of self-play training loops
@@ -272,7 +273,7 @@ class MCTSDiffusionSearch:
         import csv
         import os
 
-        log_path = f"{OUTPUT_DIR}/diffusion_sequence_log.csv"
+        log_path = f"{OUTPUT_HOME_DIR}/diffusion_sequence_log.csv"
         os.makedirs(os.path.dirname(log_path), exist_ok=True)
         file_exists = os.path.isfile(log_path)
 
@@ -515,7 +516,8 @@ def seed_diffusion_replay_buffer(csv_path, tokenizer, replay_buffer, target_samp
     print(f"✓ Initialization Complete. Replay Buffer seeded with {len(replay_buffer)} entries.")
 
 if __name__ == "__main__":
-    Path(OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
+    Path(OUTPUT_SCRATCH_DIR).mkdir(parents=True, exist_ok=True)
+    Path(OUTPUT_HOME_DIR).mkdir(parents=True, exist_ok=True)
     
     # Load vocabulary from pretraining checkpoint parameters
     tokenizer = PSELFIESTokenizer.load(os.path.dirname(PRETRAIN_CHECKPOINT) + "/tokenizer.pt")
@@ -598,7 +600,7 @@ if __name__ == "__main__":
     replay_buffer = deque(maxlen=REPLAY_BUFFER_MAX)
 
     # Point this to the physical path of your Khazana CSV file on the scratch directory
-    seed_diffusion_replay_buffer("/storage/scratch1/2/vyadav68/polymers/mcts_diffusion/Egc_pselfies.csv", tokenizer, replay_buffer)
+    seed_diffusion_replay_buffer("/storage/home/hcoda1/2/vyadav68/scratch/polymers/mcts_diffusion/Egc_pselfies.csv", tokenizer, replay_buffer)
 
     # ── NEW ALPHA ZERO ADDITION: SELF-PLAY TRAINING LOOP ────────────────────
     print("🚀 Starting AlphaZero Masked Discrete Diffusion Finetuning Loop...")
@@ -685,11 +687,11 @@ if __name__ == "__main__":
                 "vocab_size": tokenizer.vocab_size,
                 "property_min": PROPERTY_MIN,
                 "property_max": PROPERTY_MAX,
-            }, f"{OUTPUT_DIR}/mctd_model_iter_{iteration+1}.pt")
+            }, f"{OUTPUT_SCRATCH_DIR}/mctd_model_iter_{iteration+1}.pt")
 
         if (iteration + 1) % 10 == 0:
             # 2. Append and export sample efficiency curves for plotting
-            log_path = f"{OUTPUT_DIR}/sample_efficiency_metrics.csv"
+            log_path = f"{OUTPUT_HOME_DIR}/sample_efficiency_metrics.csv"
             new_row = pd.DataFrame([{
                 "iteration": iteration + 1,
                 "true_oracle_calls": search_engine.true_oracle_calls,
@@ -699,4 +701,19 @@ if __name__ == "__main__":
                 new_row.to_csv(log_path, mode='a', header=False, index=False)
             else:
                 new_row.to_csv(log_path, mode='w', header=True, index=False)
+
+        # Final Iteration Production Save
+        if (iteration + 1) == ITERATIONS:
+            print(f"🎉 Training complete! Archiving final model state and metadata in home...")
+            torch.save({
+                "model_state_dict": model.state_dict(),
+                "tokenizer_vocab":  tokenizer.vocab,
+                "vocab_size":       tokenizer.vocab_size,
+                "property_min":     PROPERTY_MIN,
+                "property_max":     PROPERTY_MAX,
+                "iteration":        iteration + 1,
+            }, f"{OUTPUT_HOME_DIR}/final_mctd_diffusion_model.pt")
+            
+            # Explicitly save a clean copy of the tokenizer right next to it
+            tokenizer.save(f"{OUTPUT_HOME_DIR}/tokenizer.pt")
     # ────────────────────────────────────────────────────────────────────

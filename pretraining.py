@@ -33,9 +33,11 @@ from tokenizer_pselfies import PSELFIESTokenizer
 # CONFIGURATION
 # ============================================================================
 
-DATA_PATH = "/storage/home/hcoda1/2/vyadav68/scratch/polymers/PI1M_v2_pselfies.csv"
-OUTPUT_DIR = './checkpoints/pretrain'
-PLOT_DIR = './plots/pretrain'
+DATA_PATH = "/storage/home/hcoda1/2/vyadav68/r-cdeo3-0/polymers/PI1M_v2_pselfies.csv"
+# Split Tracking Paths
+OUTPUT_SCRATCH_DIR = '/storage/home/hcoda1/2/vyadav68/scratch/polymers/checkpoints/pretrain'
+OUTPUT_HOME_DIR    = './checkpoints/pretrain'
+PLOT_DIR           = './plots/pretrain'
 
 MODEL_NAME = "answerdotai/ModernBERT-base"
 USE_PROPERTY_CONDITIONING = True
@@ -200,7 +202,9 @@ def create_interrupt_handler(model, optimizer, scheduler, history, output_dir, t
 # MAIN TRAINING FUNCTION
 # ============================================================================
 if __name__ == "__main__":
-    Path(OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
+    # Create both the scratch and home directory branches cleanly
+    Path(OUTPUT_SCRATCH_DIR).mkdir(parents=True, exist_ok=True)
+    Path(OUTPUT_HOME_DIR).mkdir(parents=True, exist_ok=True)
     Path(PLOT_DIR).mkdir(parents=True, exist_ok=True)
 
     print("\n" + "="*60)
@@ -309,7 +313,7 @@ if __name__ == "__main__":
 
     # ── NEW LOADING ENGINE: RESUME FROM CHECKPOINT ───────────────────
     if RESUME_FROM_STEP is not None:
-        checkpoint_path = Path(OUTPUT_DIR) / f"checkpoint-{RESUME_FROM_STEP}" / "model.pt"
+        checkpoint_path = Path(OUTPUT_SCRATCH_DIR) / f"checkpoint-{RESUME_FROM_STEP}" / "model.pt"
         if checkpoint_path.exists():
             print(f"\n🔄 Resuming diffusion pretraining from step {RESUME_FROM_STEP}...")
             checkpoint = torch.load(checkpoint_path, map_location=device)
@@ -326,7 +330,7 @@ if __name__ == "__main__":
             print(f"⚠️ Checkpoint path '{checkpoint_path}' not found! Starting from scratch.")
     # ────────────────────────────────────────────────────────────────
 
-    interrupt_handler = create_interrupt_handler(model, optimizer, scheduler, history, OUTPUT_DIR, tokenizer)
+    interrupt_handler = create_interrupt_handler(model, optimizer, scheduler, history, OUTPUT_SCRATCH_DIR, tokenizer)
     signal.signal(signal.SIGINT, interrupt_handler)
     signal.signal(signal.SIGTERM, interrupt_handler)
 
@@ -407,7 +411,7 @@ if __name__ == "__main__":
                 
                 if global_step % SAVE_STEPS == 0:
                     save_checkpoint(
-                        model, optimizer, scheduler, history, global_step, epoch, OUTPUT_DIR, loss.item() * GRADIENT_ACCUMULATION_STEPS, tokenizer
+                        model, optimizer, scheduler, history, global_step, epoch, OUTPUT_SCRATCH_DIR, loss.item() * GRADIENT_ACCUMULATION_STEPS, tokenizer
                     )
 
         # ── VALIDATION UPGRADE: EVALUATION HOOK PASS ──
@@ -460,7 +464,7 @@ if __name__ == "__main__":
     print("SAVING FINAL MODEL & TOKENIZER")
     print("="*60)
 
-    final_path = Path(OUTPUT_DIR) / "best_pretrain"
+    final_path = Path(OUTPUT_HOME_DIR) / "best_pretrain"
     final_path.mkdir(parents=True, exist_ok=True)
 
     # ── CRITICAL EDIT 3: Explicitly saving the tokenizer file ─────────────────
