@@ -79,12 +79,19 @@ class PSELFIESTokenizer:
         return ids
 
     def decode(self, ids: List[int], skip_special_tokens: bool = True) -> str:
-        """Decode token IDs back to PSELFIES string."""
+        """Decode token IDs back to PSELFIES string with automatic EOS termination."""
         tokens = []
         for idx in ids:
             token = self.inverse_vocab.get(idx, self.unk_token)
-            if skip_special_tokens and token in [self.pad_token, self.bos_token, self.eos_token]:
+            
+            # 1. Catch the model's EOS signal and stop decoding immediately
+            if token == self.eos_token:
+                break
+                
+            # 2. Silently skip formatting placeholders 
+            if skip_special_tokens and token in [self.pad_token, self.bos_token]:
                 continue
+                
             tokens.append(token)
         return "".join(tokens)
 

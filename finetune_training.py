@@ -58,6 +58,11 @@ MIN_BUFFER_SIZE = 256
 LEARNING_RATE_BACKBONE = 2e-6  # Micro-LR to anchor core PSELFIES chemistry grammar
 LEARNING_RATE_HEADS = 5e-5     # Faster learning rate for conditioning and heads
 MAX_GRAD_NORM = 1.0
+KL_BETA = 0.01
+SIGMA_START = 0.5      # Wide reward landscape at start
+SIGMA_END = 0.15       # Tighter target precision at end
+SIGMA_ANNEAL_START = 2000   # Iteration to begin tightening
+SIGMA_ANNEAL_END = 4000     # Iteration to reach final sigma
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -268,7 +273,7 @@ class MCTSDiffusionSearch:
             # Global fallback catch-all to prevent any unexpected execution failures
             return -1.0
 
-    def evaluate_terminal(self, node, target_raw):
+    def evaluate_terminal(self, node, target_raw, sigma):
         """Calculates infinite-chain polymer band gap using an oligomeric 1/N scaling law extrapolation."""
         import csv
         import os
@@ -358,7 +363,7 @@ class MCTSDiffusionSearch:
                         csv.writer(f).writerow([psmiles_raw, smiles_raw, smiles_clean, True, -1.0])
                     return -1.0
                 
-                reward = math.exp(-((infinite_gap - target_raw) ** 2) / (2 * 0.1 ** 2))
+                reward = math.exp(-((infinite_gap - target_raw) ** 2) / (2 * sigma ** 2))
                 final_score = (reward * 2.0) - 1.0
                 
                 with open(log_path, 'a', newline='') as f:
@@ -379,7 +384,7 @@ class MCTSDiffusionSearch:
             node = node.parent
 
     # 1. Inside MCTSDiffusionSearch.run_search:
-    def run_search(self, target_norm):
+    def run_search(self, target_norm, sigma):
         root_tensor = torch.full((MAX_LENGTH,), self.special['mask'], dtype=torch.long)
         root_tensor[0] = self.special['bos']
         root = MCTSNode(root_tensor)
@@ -430,7 +435,7 @@ class MCTSDiffusionSearch:
                     trajectory.append((root.state.clone(), pos, self.special['pad'], target_raw))
                     root.state[pos] = self.special['pad']
 
-        final_reward = self.evaluate_terminal(root, target_raw)
+        final_reward = self.evaluate_terminal(root, target_raw, sigma)
         
         # Apply an exponential temporal decay scale over macro unmasking operations
         updated_trajectory = []
@@ -511,9 +516,18 @@ def seed_diffusion_replay_buffer(csv_path, tokenizer, replay_buffer, target_samp
             raw_reward = math.exp(-((true_gap - target_raw) ** 2) / (2 * 0.5 ** 2))
             final_reward = (raw_reward * 2.0) - 1.0 
             
-            replay_buffer.append((state_tensor, chosen_pos, chosen_tok, target_raw, final_reward))
+            replay_buffer.append((state_tensor, chosen_pos, chosen_tok, target_raw, final_reward, final_reward))
             
     print(f"✓ Initialization Complete. Replay Buffer seeded with {len(replay_buffer)} entries.")
+
+def get_current_sigma(iteration):
+    """Linearly anneals sigma from SIGMA_START to SIGMA_END between anneal iterations."""
+    if iteration < SIGMA_ANNEAL_START:
+        return SIGMA_START
+    if iteration >= SIGMA_ANNEAL_END:
+        return SIGMA_END
+    progress = (iteration - SIGMA_ANNEAL_START) / (SIGMA_ANNEAL_END - SIGMA_ANNEAL_START)
+    return SIGMA_START + progress * (SIGMA_END - SIGMA_START)
 
 if __name__ == "__main__":
     Path(OUTPUT_SCRATCH_DIR).mkdir(parents=True, exist_ok=True)
@@ -572,6 +586,16 @@ if __name__ == "__main__":
     hf_capture.torch = torch
     # ────────────────────────────────────────────────────────────────
 
+    # After loading model weights, before compile — create frozen reference
+    ref_model = ConditionalDiffusionLM(
+        vocab_size=tokenizer.vocab_size, 
+        use_property_conditioning=PROPERTY_CONDITIONING
+    ).to(device)
+    ref_model.load_state_dict(state_dict)
+    ref_model.eval()
+    for p in ref_model.parameters():
+        p.requires_grad = False
+
     # ── COMPILATION ROUTINE ─────────────────────────────────────────
     if USE_COMPILE:
         try:
@@ -610,7 +634,8 @@ if __name__ == "__main__":
         # 1. Self-Play Episode Generation
         model.eval()
         target_norm = random.uniform(0.0, 1.0) # Uniformly sample property goals across the 0-10 eV distribution
-        episode_data = search_engine.run_search(target_norm)
+        current_sigma = get_current_sigma(iteration)
+        episode_data = search_engine.run_search(target_norm, current_sigma)
         replay_buffer.extend(episode_data)
 
         # Wait until the memory buffer has collected sufficient self-play transitions
@@ -634,21 +659,35 @@ if __name__ == "__main__":
 
         model.train()
         optimizer.zero_grad()
+        
+        with torch.no_grad():
+            ref_logits, _ = ref_model(states, (states != tokenizer.pad_id).long(), timesteps, targets)
 
         with autocast(device_type=device.type, enabled=(device.type == 'cuda')):
             logits, values = model(states, (states != tokenizer.pad_id).long(), timesteps, targets)
             
             # POLICY HEAD LOSS
-            target_logits = logits[torch.arange(BATCH_SIZE), positions]
-            policy_loss = F.cross_entropy(target_logits, tokens)
+            target_logits = logits[torch.arange(len(batch), device=device), positions]
+            per_sample_loss = F.cross_entropy(target_logits, tokens, reduction='none')
+            
+            # CORRECTED: Combine action error directly with the MCTS physics rewards
+            # (No artificial EOS scaling here; let the xTB oracle completely guide the policy path!)
+            policy_gradient_loss = per_sample_loss * rewards
+            policy_loss = policy_gradient_loss.mean()
             
             # VALUE HEAD LOSS - Explicitly force float32 promotion here:
             extracted_values = values.view(-1).float()
             raw_value_loss = F.mse_loss(extracted_values, value_targets.view(-1), reduction='none')
             value_loss = raw_value_loss.mean()
-            
+
+            kl_loss = F.kl_div(
+                F.log_softmax(logits.float(), dim=-1),
+                F.softmax(ref_logits.float(), dim=-1),
+                reduction='batchmean'
+            )
+
             # Joint objective loss calculation
-            total_loss = policy_loss + value_loss
+            total_loss = policy_loss + value_loss + KL_BETA * kl_loss
 
         if scaler is not None:
             scaler.scale(total_loss).backward()
@@ -668,6 +707,7 @@ if __name__ == "__main__":
             
             print(
                 f"Iter {iteration+1}/{ITERATIONS} | "
+                f"sigma={current_sigma:.4f} "
                 f"loss={total_loss.item():.4f} "
                 f"policy={policy_loss.item():.4f} "
                 f"value={value_loss.item():.4f} "         # should fall over time

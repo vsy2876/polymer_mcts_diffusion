@@ -54,7 +54,7 @@ NUM_WORKERS = 8
 
 USE_AMP = True  
 USE_COMPILE = True  
-RESUME_FROM_STEP = 11000
+RESUME_FROM_STEP = None
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Using device: {device}")
@@ -129,14 +129,20 @@ class DiffusionCollator:
         targets = input_ids.clone()
         
         for i in range(batch_size):
-            # ─────────────── OLD / CURRENT CODE ───────────────
+            # ─────────────── OLDEST / CURRENT CODE ───────────────
             # valid_positions = (input_ids[i] != self.pad_token_id) & \
             #                 (input_ids[i] != self.bos_token_id) & \
             #                 (input_ids[i] != self.eos_token_id)
 
-            # ─────────────── NEW OPTIMIZED CODE ───────────────
-            # Protect ONLY the global start marker <BOS>; allow EOS and PAD to be masked!
-            valid_positions = (input_ids[i] != self.bos_token_id)
+            # ─────────────── OLD CODE ───────────────
+            # # Protect ONLY the global start marker <BOS>; allow EOS and PAD to be masked!
+            # valid_positions = (input_ids[i] != self.bos_token_id)
+
+            # ─────────────── NEW CODE ───────────────
+            # In DiffusionCollator — protect BOS and PAD only
+            valid_positions = (input_ids[i] != self.bos_token_id) & \
+                            (input_ids[i] != self.pad_token_id)
+            
             valid_indices = valid_positions.nonzero(as_tuple=True)[0]
 
             # 1. Initialize an empty tracking canvas for this sequence
@@ -304,10 +310,12 @@ if __name__ == "__main__":
     total_steps = len(dataloader) * EPOCHS
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps, eta_min=1e-7)
     # criterion = nn.CrossEntropyLoss(ignore_index=special_tokens['pad'])
-    criterion = nn.CrossEntropyLoss(ignore_index=-100)
+    criterion_per_token = nn.CrossEntropyLoss(ignore_index=-100, reduction = 'none')
+    eos_weight = 5.0
     scaler = torch.amp.GradScaler('cuda') if (USE_AMP and device.type == 'cuda') else None
 
     history = {'train_loss': [], 'learning_rate': [], 'steps': [], 'epochs': [], 'val_loss': []}
+    best_val_loss = float('inf')
     global_step = 0
     start_epoch = 0
 
@@ -368,7 +376,15 @@ if __name__ == "__main__":
                 )
                 
                 # A. Diffusion MLM Loss (Calculated strictly on masked targets)
-                diffusion_loss = criterion(logits.view(-1, vocab_size), labels.view(-1))
+                # OLD
+                # diffusion_loss = criterion(logits.view(-1, vocab_size), labels.view(-1))
+
+                # CURRENT
+                per_token_loss = criterion_per_token(logits.view(-1, vocab_size), labels.view(-1))
+
+                weights = torch.ones_like(labels.view(-1), dtype=torch.float)
+                weights[labels.view(-1) == tokenizer.eos_id] = eos_weight
+                diffusion_loss = (per_token_loss * weights).mean()
                 
                 # B. Value Head Anchor Loss (Stabilizes critic baseline at 0.0 for real data)
                 value_loss = nn.functional.mse_loss(values, torch.zeros_like(values))
@@ -437,7 +453,15 @@ if __name__ == "__main__":
                         input_ids=v_input_ids, attention_mask=v_attn_mask,
                         timestep=v_mask_ratios, prop=v_properties
                     )
-                    v_diff_loss = criterion(v_logits.view(-1, vocab_size), v_labels.view(-1))
+                    # OLD
+                    # v_diff_loss = criterion(v_logits.view(-1, vocab_size), v_labels.view(-1))
+                    
+                    # Current
+                    v_per_token_loss = criterion_per_token(v_logits.view(-1, vocab_size), v_labels.view(-1))
+                    v_weights = torch.ones_like(v_labels.view(-1), dtype=torch.float)
+                    v_weights[v_labels.view(-1) == tokenizer.eos_id] = eos_weight
+                    v_diff_loss = (v_per_token_loss * v_weights).mean()
+                    
                     v_val_loss = nn.functional.mse_loss(v_values, torch.zeros_like(v_values))
                     
                     batch_loss = v_diff_loss + 0.1 * v_val_loss
@@ -446,6 +470,20 @@ if __name__ == "__main__":
                 
         val_loss /= len(val_dataloader)
         epoch_loss /= len(dataloader)
+
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_path = Path(OUTPUT_HOME_DIR) / "best_pretrain"
+            best_path.mkdir(parents=True, exist_ok=True)
+            tokenizer.save(str(best_path / "tokenizer.pt"))
+            torch.save({
+                'model_state_dict': model.state_dict(),
+                'vocab_size': vocab_size,
+                'tokenizer_vocab': tokenizer.vocab,
+                'total_steps': global_step,
+                'epochs': EPOCHS,
+            }, best_path / "best_pretrain.pt")
+            print(f"✓ New best model saved (val_loss={val_loss:.4f})")
         
         # Record everything cleanly to history arrays
         history['epochs'].append(epoch + 1)
@@ -477,9 +515,10 @@ if __name__ == "__main__":
         'tokenizer_vocab': tokenizer.vocab,
         'total_steps': global_step,
         'epochs': EPOCHS,
-    }, final_path / "best_pretrain.pt")
+    }, final_path / "last_pretrain.pt")
 
-    print(f"✓ Model saved to: {final_path / 'best_pretrain.pt'}")
+    print(f"✓ Last epoch model saved to: {final_path / 'last_pretrain.pt'}")
+    print(f"✓ Best model already saved to: {final_path / 'best_pretrain.pt'} (val_loss={best_val_loss:.4f})")
     print(f"✓ Tokenizer saved to: {final_path / 'tokenizer.pt'}")
 
     # ── PLOTTING UPGRADE: 3-PANEL CONFIGURATION DIAGNOSTICS CHANNELS ──
