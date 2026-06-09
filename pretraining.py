@@ -35,7 +35,7 @@ from tokenizer_pselfies import PSELFIESTokenizer
 
 DATA_PATH = "/storage/home/hcoda1/2/vyadav68/r-cdeo3-0/polymers/PI1M_v2_pselfies.csv"
 # Split Tracking Paths
-OUTPUT_SCRATCH_DIR = '/storage/home/hcoda1/2/vyadav68/scratch/polymers/checkpoints/pretrain'
+OUTPUT_SCRATCH_DIR = '/storage/home/hcoda1/2/vyadav68/scratch/polymers/mcts_diffusion/checkpoints/pretrain'
 OUTPUT_HOME_DIR    = './checkpoints/pretrain'
 PLOT_DIR           = './plots/pretrain'
 

@@ -41,7 +41,7 @@ from rdkit.Chem import AllChem
 PRETRAIN_CHECKPOINT = "./checkpoints/pretrain/best_pretrain/best_pretrain.pt"
 PROPERTY_MIN = 0.5
 PROPERTY_MAX = 10.0
-OUTPUT_SCRATCH_DIR = '/storage/home/hcoda1/2/vyadav68/scratch/polymers/checkpoints/mcts_diffusion'
+OUTPUT_SCRATCH_DIR = '/storage/home/hcoda1/2/vyadav68/scratch/polymers/mcts_diffusion/checkpoints/mcts_diffusion'
 OUTPUT_HOME_DIR    = './checkpoints/mcts_diffusion'
 
 MAX_LENGTH = 128     # Adjusted to PSELFIES pretrain configuration
