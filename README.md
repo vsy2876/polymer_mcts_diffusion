@@ -45,6 +45,8 @@ bash mcts.sh
 ## Research Attribution
 This codebase is a component of ongoing graduate research at the Georgia Institute of Technology (School of Materials Science & Engineering).
 
-Copyright & Licensing
+## Copyright & Licensing
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 © 2026 Vansh Suresh Yadav. All rights reserved.
 This code is intended exclusively for private research evaluation. Copying, distributing, or modifying these files without explicit authorization is strictly prohibited.
