@@ -6,7 +6,7 @@ Unsupervised masked language modeling to teach the ModernBERT backbone PSELFIES 
 
 import os
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
-
+import random
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
@@ -43,7 +43,7 @@ MODEL_NAME = "answerdotai/ModernBERT-base"
 USE_PROPERTY_CONDITIONING = True
 MAX_LENGTH = 128  # Adjusted to match your PSELFIES config
 
-EPOCHS = 10
+EPOCHS = 5
 BATCH_SIZE = 256  
 GRADIENT_ACCUMULATION_STEPS = 2  
 LEARNING_RATE = 5e-5
@@ -54,10 +54,70 @@ NUM_WORKERS = 8
 
 USE_AMP = True  
 USE_COMPILE = True  
-RESUME_FROM_STEP = None
+RESUME_FROM_STEP = 6000
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Using device: {device}")
+
+# ============================================================================
+# SPAN MASKING FUNCTION
+# ============================================================================
+
+def apply_diffusion_masking(input_ids, mask_ratios, tokenizer, device, use_span_masking=True):
+    masked_input_ids = input_ids.clone()
+    labels = torch.full_like(input_ids, -100) # -100 is ignored by CrossEntropyLoss
+    
+    is_special = (
+        (input_ids == tokenizer.pad_id) |
+        (input_ids == tokenizer.bos_id) |
+        (input_ids == tokenizer.eos_id)
+    )
+    
+    for i in range(input_ids.size(0)):
+        valid_positions = (~is_special[i]).nonzero(as_tuple=True)[0]
+        n_valid = len(valid_positions)
+        n_to_mask = int(mask_ratios[i].item() * n_valid)
+        
+        if n_to_mask > 0:
+            if use_span_masking:
+                masked_indices_set = set()
+                attempts = 0
+                
+                span_length_samples = torch.poisson(
+                    torch.full((200,), 3.0)
+                ).clamp(1, 8).int().tolist()
+                
+                while len(masked_indices_set) < n_to_mask and attempts < 100:
+                    span_len = span_length_samples[attempts % 200]
+                    
+                    if n_valid <= span_len:
+                        start_idx = 0
+                    else:
+                        start_idx = random.randint(0, n_valid - span_len)
+                    
+                    for offset in range(span_len):
+                        if start_idx + offset < n_valid:
+                            masked_indices_set.add(start_idx + offset)
+                    
+                    attempts += 1
+                
+                for idx in masked_indices_set:
+                    pos = valid_positions[idx].item()
+                    labels[i, pos] = input_ids[i, pos]
+                    masked_input_ids[i, pos] = tokenizer.mask_id
+                    
+            else:
+                perm = torch.randperm(n_valid, device=device)[:n_to_mask]
+                positions_to_mask = valid_positions[perm]
+                labels[i, positions_to_mask] = input_ids[i, positions_to_mask]
+                masked_input_ids[i, positions_to_mask] = tokenizer.mask_id
+            
+    mask_counts = (masked_input_ids == tokenizer.mask_id).sum(dim=1).float()
+    seq_lengths = (~is_special).sum(dim=1).float().clamp(min=1.0)
+    timesteps = mask_counts / seq_lengths
+    attn_mask = (masked_input_ids != tokenizer.pad_id).long()
+    
+    return masked_input_ids, labels, attn_mask, timesteps
 
 # ============================================================================
 # DATASET CLASS
@@ -93,77 +153,62 @@ class PI1MDataset(Dataset):
     
     def __getitem__(self, idx):
         smiles = str(self.smiles[idx])
-        # PSELFIESTokenizer returns a list of ids, so we pad it here or in tokenizer
         encoded = self.tokenizer.encode(smiles, add_special_tokens=True)
         
-        # Ensure padding to max_length
         if len(encoded) < self.max_length:
             attention_mask = [1] * len(encoded) + [0] * (self.max_length - len(encoded))
             encoded = encoded + [self.tokenizer.pad_id] * (self.max_length - len(encoded))
+        
+        elif len(encoded) > self.max_length:
+            # Truncate to max_length-1, then force EOS at the end
+            encoded = encoded[:self.max_length - 1]
+            encoded.append(self.tokenizer.eos_id)
+            attention_mask = [1] * self.max_length  # All valid tokens (no PAD)
+        
         else:
-            encoded = encoded[:self.max_length]
+            # Exactly max_length — already fits perfectly
             attention_mask = [1] * self.max_length
-            
+        
         return {
             'input_ids': torch.tensor(encoded, dtype=torch.long),
             'attention_mask': torch.tensor(attention_mask, dtype=torch.long),
-        }
+    }
 
 class DiffusionCollator:
-    """Data collator for masked diffusion training with variable masking ratio."""
+    """Data collator that applies random length exposure and span masking."""
     
-    def __init__(self, mask_token_id, pad_token_id, bos_token_id, eos_token_id):
-        self.mask_token_id = mask_token_id
-        self.pad_token_id = pad_token_id
-        self.bos_token_id = bos_token_id
-        self.eos_token_id = eos_token_id
+    def __init__(self, tokenizer, random_length_prob=0.15):
+        self.tokenizer = tokenizer
+        self.random_length_prob = random_length_prob
         
     def __call__(self, batch):
         input_ids = torch.stack([item['input_ids'] for item in batch])
         attention_mask = torch.stack([item['attention_mask'] for item in batch])
         
-        batch_size, seq_len = input_ids.shape
-        mask_ratios = torch.rand(batch_size)
+        batch_size = input_ids.size(0)
         
-        masked_input_ids = input_ids.clone()
-        targets = input_ids.clone()
-        
+        # 1. Random length exposure (teaches model to stop early)
         for i in range(batch_size):
-            # ─────────────── OLDEST / CURRENT CODE ───────────────
-            # valid_positions = (input_ids[i] != self.pad_token_id) & \
-            #                 (input_ids[i] != self.bos_token_id) & \
-            #                 (input_ids[i] != self.eos_token_id)
-
-            # ─────────────── OLD CODE ───────────────
-            # # Protect ONLY the global start marker <BOS>; allow EOS and PAD to be masked!
-            # valid_positions = (input_ids[i] != self.bos_token_id)
-
-            # ─────────────── NEW CODE ───────────────
-            # In DiffusionCollator — protect BOS and PAD only
-            valid_positions = (input_ids[i] != self.bos_token_id) & \
-                            (input_ids[i] != self.pad_token_id)
-            
-            valid_indices = valid_positions.nonzero(as_tuple=True)[0]
-
-            # 1. Initialize an empty tracking canvas for this sequence
-            is_masked = torch.zeros_like(input_ids[i], dtype=torch.bool)
-            
-            if len(valid_indices) > 0:
-                num_to_mask = int(len(valid_indices) * mask_ratios[i])
-                if num_to_mask > 0:
-                    mask_indices = valid_indices[torch.randperm(len(valid_indices))[:num_to_mask]]
-                    masked_input_ids[i, mask_indices] = self.mask_token_id
-
-                    # 2. Record exactly which coordinates were modified
-                    is_masked[mask_indices] = True
-
-            # 3. Unconditionally strip information from unmasked coordinates
-            targets[i, ~is_masked] = -100
+            if torch.rand(1).item() < self.random_length_prob:
+                true_len = attention_mask[i].sum().item()
+                if true_len > 3:
+                    new_len = torch.randint(3, true_len + 1, (1,)).item()
+                    input_ids[i, new_len - 1] = self.tokenizer.eos_id
+                    input_ids[i, new_len:] = self.tokenizer.pad_id
+                    attention_mask[i, new_len:] = 0
+                    
+        # 2. Generate random mask ratios (between 10% and 90%)
+        mask_ratios = torch.rand(batch_size) * 0.80 + 0.10
+        
+        # 3. Apply optimized span masking
+        masked_input_ids, labels, _, _ = apply_diffusion_masking(
+            input_ids, mask_ratios, self.tokenizer, 'cpu', use_span_masking=True
+        )
         
         return {
             'input_ids': masked_input_ids,
             'attention_mask': attention_mask,
-            'labels': targets,
+            'labels': labels,
             'mask_ratios': mask_ratios,
         }
 
@@ -250,10 +295,27 @@ if __name__ == "__main__":
         'bos': tokenizer.bos_id, 'eos': tokenizer.eos_id
     }
     
+    # ── OLD collator instantiation ──────────────────────────────
+    # collator = DiffusionCollator(
+    #     mask_token_id=special_tokens['mask'], pad_token_id=special_tokens['pad'],
+    #     bos_token_id=special_tokens['bos'], eos_token_id=special_tokens['eos']
+    # )
+    # ─────────────────────────────────────────────────────────────
+    
+    # ── OLD collator instantiation with eos_mask_prob ───────────
+    # collator = DiffusionCollator(
+    #     mask_token_id=special_tokens['mask'], pad_token_id=special_tokens['pad'],
+    #     bos_token_id=special_tokens['bos'], eos_token_id=special_tokens['eos'],
+    #     eos_mask_prob=0.8  # NEW: force EOS into mask 80% of the time
+    # )
+    # # ─────────────────────────────────────────────────────────────
+
+    # ── NEW collator instantiation with eos_mask_prob ───────────
     collator = DiffusionCollator(
-        mask_token_id=special_tokens['mask'], pad_token_id=special_tokens['pad'],
-        bos_token_id=special_tokens['bos'], eos_token_id=special_tokens['eos']
+        tokenizer=tokenizer,
+        random_length_prob=0.15
     )
+    # ─────────────────────────────────────────────────────────────
 
     dataloader = DataLoader(
         train_dataset, batch_size=BATCH_SIZE, shuffle=True,
@@ -311,7 +373,15 @@ if __name__ == "__main__":
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps, eta_min=1e-7)
     # criterion = nn.CrossEntropyLoss(ignore_index=special_tokens['pad'])
     criterion_per_token = nn.CrossEntropyLoss(ignore_index=-100, reduction = 'none')
-    eos_weight = 5.0
+    
+    # ── OLD eos_weight ──────────────────────────────────────────
+    # eos_weight = 5.0
+    # ─────────────────────────────────────────────────────────────
+    
+    # ── NEW eos_weight ──────────────────────────────────────────
+    eos_weight = 10.0  # NEW: upweight EOS to combat ~20:1 frequency imbalance vs [C]f
+    # ─────────────────────────────────────────────────────────────
+    
     scaler = torch.amp.GradScaler('cuda') if (USE_AMP and device.type == 'cuda') else None
 
     history = {'train_loss': [], 'learning_rate': [], 'steps': [], 'epochs': [], 'val_loss': []}
@@ -435,6 +505,11 @@ if __name__ == "__main__":
         val_loss = 0.0
         print(f"\n🧪 Running validation evaluations for Epoch {epoch+1}...")
         
+        # ── NEW: EOS accuracy tracking counters ───────────────────
+        total_eos_correct = 0
+        total_eos_masked = 0
+        # ─────────────────────────────────────────────────────────────
+        
         with torch.no_grad():
             for val_batch in tqdm(val_dataloader, desc="Validation"):
                 v_input_ids = val_batch['input_ids'].to(device, non_blocking=True)
@@ -465,6 +540,16 @@ if __name__ == "__main__":
                     v_val_loss = nn.functional.mse_loss(v_values, torch.zeros_like(v_values))
                     
                     batch_loss = v_diff_loss + 0.1 * v_val_loss
+                    
+                    # ── NEW: track EOS accuracy on masked positions ───
+                    v_labels_flat = v_labels.view(-1)
+                    v_logits_flat = v_logits.view(-1, vocab_size)
+                    eos_mask_flat = (v_labels_flat == tokenizer.eos_id)
+                    if eos_mask_flat.any():
+                        eos_preds = v_logits_flat[eos_mask_flat].argmax(-1)
+                        total_eos_correct += (eos_preds == tokenizer.eos_id).sum().item()
+                        total_eos_masked += eos_mask_flat.sum().item()
+                    # ───────────────────────────────────────────────────
                 
                 val_loss += batch_loss.item()
                 
@@ -492,7 +577,18 @@ if __name__ == "__main__":
             history['val_loss'] = []
         history['val_loss'].append(val_loss)
         
-        print(f"📊 Epoch {epoch+1} Results -> Train Loss: {epoch_loss:.4f} | Val Loss: {val_loss:.4f}")
+        # ── OLD epoch summary print ─────────────────────────────────
+        # print(f"📊 Epoch {epoch+1} Results -> Train Loss: {epoch_loss:.4f} | Val Loss: {val_loss:.4f}")
+        # ─────────────────────────────────────────────────────────────
+        
+        # ── NEW epoch summary print with EOS accuracy ─────────────────
+        print(f"📊 Epoch {epoch+1} Results -> Train Loss: {epoch_loss:.4f} | Val Loss: {val_loss:.4f}", end="")
+        if total_eos_masked > 0:
+            eos_acc = total_eos_correct / total_eos_masked
+            print(f" | EOS Acc (masked): {eos_acc:.3f} ({total_eos_correct}/{total_eos_masked})")
+        else:
+            print(" | No EOS masked in validation")
+        # ─────────────────────────────────────────────────────────────
         
         # Reset model state back to train mode for the next epoch iteration
         model.train()

@@ -6,5 +6,6 @@ plots/
 *.csv
 *.out
 *.err
+test_diffusion_inference.py
 surrogate.py
 surrogate.sh
