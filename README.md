@@ -10,7 +10,7 @@ Rather than utilizing standard token-by-token sequence estimation loops, this fr
 * Latent Property Conditioning: Conditioned explicitly via high-dimensional continuous frequency projections that map numerical electronic band gap (E_g) targets into latent transformer weights during fine-tuning phases.
 * Syntactic Safety: Governed entirely within a specialized tokenizer_pselfies.py engine, bounding the generative denoising process within strictly valid polymer-adapted SELFIES token rules.
 
-**I am currently working on version 2 of the model, updates will be made to the README when repo is updated.**
+**Note: This repository is being actively revised as part of a version 2 update to the model. The README and results above will be updated to reflect the new version once the repo changes are complete.**
 
 ---
 
