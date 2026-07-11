@@ -10,10 +10,33 @@ Rather than utilizing standard token-by-token sequence estimation loops, this fr
 * Latent Property Conditioning: Conditioned explicitly via high-dimensional continuous frequency projections that map numerical electronic band gap (E_g) targets into latent transformer weights during fine-tuning phases.
 * Syntactic Safety: Governed entirely within a specialized tokenizer_pselfies.py engine, bounding the generative denoising process within strictly valid polymer-adapted SELFIES token rules.
 
+**I am currently working on version 2 of the model, updates will be made to the README when repo is updated.**
+
 ---
 
 ## Pretrain Structure
 ![Diffusion Results](diffusion_generations.png)
+
+---
+
+## Results
+ 
+**Status: evaluation in progress.**
+ 
+This repo implements Phase 3 (online MCTS-guided RL) of the pipeline for the diffusion
+model, building on the Phase 1 base rates reported in
+[`polymer_diffusion`](https://github.com/vsy2876/polymer_diffusion) (3.94% raw validity,
+0.41 eV MAE against target, pre-search).
+ 
+Quantitative results for this repo — post-search validity rate, target-property MAE,
+xTB simulation success rate, and heavy-atom distribution — will be added once the current
+evaluation run completes.
+ 
+### Failure modes diagnosed (see full writeup below / in commit history)
+ 
+- **Macromolecule Timeout:** diffusion model confidently generating oversized structures
+  that 100% timed out in xTB. Fixed via heavy-atom hard block (reject <6 or >40 atoms),
+  soft size discount, and a slowed KL beta schedule with a raised floor and hard threshold.
 
 ---
 
